@@ -128,7 +128,21 @@ async def plugin_send(handle, payload, stream_id):
     payload_sorted=sorted(payload, key=lambda i: (i['asset_code'],i['user_ts'])) #Supposed to make sure readings are sorted by asset code, and timestamp ascending
 
     # _LOGGER.info('Create Table Check')
-    createTableCheck(payload_sorted,database,pluginId)
+    lastassetname=''
+    for p in payload_sorted:
+        asset_code=p['asset_code']
+        if asset_code!=lastassetname:
+            readings=p['reading']     
+            if asset_code not in assetList:
+                for readingName,value in readings.items(): 
+                    valueType =  type(value).__name__
+                    createTableString=createTableString + database+"."+asset_code+"_"+readingName+" USING "+database+".fledge_"+valueType+" TAGS ('"+readingName+"','"+pluginId+"') "
+                assetList.append(asset_code)
+                if len(createTableString)>60000:
+                    createTables(createTableString)
+                    createTableString=''
+        
+        lastassetname=asset_code
     
     if len(createTableString)>0:
         _LOGGER.info('Create Table Submit')
@@ -194,23 +208,6 @@ def createTables(createTableString):
         else:
             raise(e)
             
-def createTableCheck(payload_sorted,database,pluginId):
-    lastassetname=''
-    for p in payload_sorted:
-        asset_code=p['asset_code']
-        if asset_code!=lastassetname:
-            readings=p['reading']     
-            if asset_code not in assetList:
-                for readingName,value in readings.items(): 
-                    valueType =  type(value).__name__
-                    createTableString=createTableString + database+"."+asset_code+"_"+readingName+" USING "+database+".fledge_"+valueType+" TAGS ('"+readingName+"','"+pluginId+"') "
-                assetList.append(asset_code)
-                if len(createTableString)>60000:
-                    createTables(createTableString)
-                    createTableString=''
-        
-        lastassetname=asset_code
-
 
 def insertReadings(insertList):
     submitString=''
