@@ -112,8 +112,7 @@ async def plugin_send(handle, payload, stream_id):
     last_object_id = 0
     num_sent=0
     createTableString=''
-    insertList=[]
-    insertListLength=0
+    insertString=''
 
     #To-do: If disconnected, reconnect
     # try: 
@@ -121,13 +120,13 @@ async def plugin_send(handle, payload, stream_id):
     # except:
     #   conn = taosrest.connect(url=handle['url']['value'], token=handle['token']['value'])
 
-    dataTypeTranslator={"float":"float", "int":"int", "bool":"bool", "str":"binary(64)"}
+    #dataTypeTranslator={"float":"float", "int":"int", "bool":"bool", "str":"binary(64)"}
     database=handle['database']['value']
     pluginId=handle['pluginId']['value']
 
     payload_sorted=sorted(payload, key=lambda i: (i['asset_code'],i['user_ts'])) #Supposed to make sure readings are sorted by asset code, and timestamp ascending
 
-    # _LOGGER.info('Create Table Check')
+    _LOGGER.info('Create Table Check')
     lastassetname=''
     for p in payload_sorted:
         asset_code=p['asset_code']
@@ -148,24 +147,20 @@ async def plugin_send(handle, payload, stream_id):
         _LOGGER.info('Create Table Submit')
         createTables(createTableString)
 
+    #Build insert string from payload
     for p in payload_sorted:
         try:
             asset_code=p['asset_code']
             readings=p['reading']     
             timestamp = str(datetime.strptime(p['user_ts'],'%Y-%m-%dt%H:%M:%S.%fz'))[:-3] #Format timestamp and chop off sub-millisecond
-            insertString=''
             for readingName, value in readings.items():
                 valueString=str(value)
                 insertString = insertString + database+"." + asset_code+"_"+readingName+" VALUES ('"+ timestamp + "', " + valueString + ", 0) "
-            if insertListLength+len(insertString)<65465:     #might be able to use insertList.__len__ instead of dedicated variable
-                insertList.append(insertString)
-                insertListLength=insertListLength+len(insertString)
-            else:
+            if len(insertString)>62000: #Could theoretically overshoot the 65k limit if there's tons of readings
                 #_LOGGER.info("Max insert statement length reached at "+str(p))
-                success=insertReadings(insertList)
+                success=insertReadings(insertString)
                 is_data_sent=success or is_data_sent
-                insertList=[insertString]
-                insertListLength=len(insertString)
+                insertString=''
 
             num_sent+=1
             last_object_id = p['id']
@@ -173,9 +168,9 @@ async def plugin_send(handle, payload, stream_id):
         except Exception as e:
             _LOGGER.info("Paylod Loop Exception! Reading "+str(p)+" --> "+str(e))
 
-    _LOGGER.info('Sending Insert String')
-    if insertList.count>0:
-        success=insertReadings(insertList,payload)  #It's possible the whole query fails, or one of the readings errors out and causes the rest not to be written. Not accounted for right now
+    #_LOGGER.info('Sending Insert String')
+    if len(insertString)>0:
+        success=insertReadings(insertString)  #It's possible the whole query fails, or one of the readings errors out and causes the rest not to be written. Not accounted for right now
         is_data_sent=success or is_data_sent 
 
     #_LOGGER.info('Events sent: '+str(num_sent)+" of "+str(len(payload))+" Data sent: "+str(is_data_sent)+" id: "+str(last_object_id))
@@ -209,24 +204,22 @@ def createTables(createTableString):
             raise(e)
             
 
-def insertReadings(insertList):
+def insertReadings(insertString):
     submitString=''
     success=False
-    for i in insertList:
-        submitString=submitString+i
     try:
-        conn.execute("INSERT INTO "+submitString)
+        conn.execute("INSERT INTO "+insertString)
         success=True
     except Exception as e:
         _LOGGER.info("Insert Exception ---> "+str(e))
-        #experimental attempt at inserting recoverable data. Not needed once we move away from SQL inserts to write data.
-        #Maybe check here if exception is a type that warrents a split/retry (skip if connection exception, etc.)
-        #if insertList.__len__()>1:
-        #    mid=int(insertList.__len__()/2)
-        #    _LOGGER.info("Submitting split list of mid "+str(mid))
-        #    list1=insertList[:mid] #I thought this would create ovelap but doesn't
-        #    list2=insertList[mid:]
-        #    success1=insertReadings("INSERT INTO "+list1)
-        #    success2=insertReadings("INSERT INTO "+list2)
-        #    success=success1 or success2
+        #experimental attempt at inserting recoverable data. Requires that inserts be passed as a list. Not needed once we move away from SQL inserts to write data.
+            #Maybe check here if exception is a type that warrents a split/retry (skip if connection exception, etc.)
+            #if insertList.__len__()>1:
+            #    mid=int(insertList.__len__()/2)
+            #    _LOGGER.info("Submitting split list of mid "+str(mid))
+            #    list1=insertList[:mid] #I thought this would create ovelap but doesn't
+            #    list2=insertList[mid:]
+            #    success1=insertReadings("INSERT INTO "+list1)
+            #    success2=insertReadings("INSERT INTO "+list2)
+            #    success=success1 or success2
     return success
