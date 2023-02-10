@@ -104,7 +104,7 @@ def plugin_init(data):
 
 
 async def plugin_send(handle, payload, stream_id):
-    _LOGGER.info('Sending readings to TDengine')
+    _LOGGER.info('Plugin send begin')
     global conn
     global assetList
 
@@ -126,37 +126,18 @@ async def plugin_send(handle, payload, stream_id):
 
     payload_sorted=sorted(payload, key=lambda i: (i['asset_code'],i['user_ts'])) #Supposed to make sure readings are sorted by asset code, and timestamp ascending
 
-    _LOGGER.info('Create Table Check')
-    lastassetname=''
-    for p in payload_sorted:
-        asset_code=p['asset_code']
-        if asset_code!=lastassetname:
-            readings=p['reading']     
-            if asset_code not in assetList:
-                for readingName,value in readings.items(): 
-                    valueType =  type(value).__name__
-                    createTableString=createTableString + database+"."+asset_code+"_"+readingName+" USING "+database+".fledge_"+valueType+" TAGS ('"+readingName+"','"+pluginId+"') "
-                assetList.append(asset_code)
-                if len(createTableString)>60000:
-                    createTables(createTableString)
-                    createTableString=''
-        
-        lastassetname=asset_code
-    
-    if len(createTableString)>0:
-        _LOGGER.info('Create Table Submit')
-        createTables(createTableString)
-
     #Build insert string from payload
+    _LOGGER.info('Parsing payload')
     for p in payload_sorted:
         try:
             asset_code=p['asset_code']
             readings=p['reading']     
             timestamp = str(datetime.strptime(p['user_ts'],'%Y-%m-%dt%H:%M:%S.%fz'))[:-3] #Format timestamp and chop off sub-millisecond
             for readingName, value in readings.items():
+                valueType =  type(value).__name__
                 valueString=str(value)
-                insertString = insertString + database+"." + asset_code+"_"+readingName+" VALUES ('"+ timestamp + "', " + valueString + ", 0) "
-            if len(insertString)>62000: #Could theoretically overshoot the 65k limit if there's tons of readings
+                insertString = insertString + database+"." + asset_code+"_"+readingName+" USING "+database+".fledge_"+valueType+" TAGS ('"+readingName+"','"+pluginId+"')" + " VALUES ('"+ timestamp + "', " + valueString + ", 0) "
+            if len(insertString)>62000: #Could theoretically overshoot the 65k limit if the next string to be added is very long
                 #_LOGGER.info("Max insert statement length reached at "+str(p))
                 success=insertReadings(insertString)
                 is_data_sent=success or is_data_sent
@@ -168,12 +149,13 @@ async def plugin_send(handle, payload, stream_id):
         except Exception as e:
             _LOGGER.info("Paylod Loop Exception! Reading "+str(p)+" --> "+str(e))
 
-    #_LOGGER.info('Sending Insert String')
+    _LOGGER.info('Checking for data to insert')
     if len(insertString)>0:
+        _LOGGER.info('Inserting data')
         success=insertReadings(insertString)  #It's possible the whole query fails, or one of the readings errors out and causes the rest not to be written. Not accounted for right now
         is_data_sent=success or is_data_sent 
 
-    #_LOGGER.info('Events sent: '+str(num_sent)+" of "+str(len(payload))+" Data sent: "+str(is_data_sent)+" id: "+str(last_object_id))
+    _LOGGER.info('Done! Events sent: '+str(num_sent)+" of "+str(len(payload))+" Data sent: "+str(is_data_sent)+" id: "+str(last_object_id))
     return is_data_sent, last_object_id, num_sent
     
 
@@ -189,20 +171,11 @@ def plugin_reconfigure(handle, new_config):
 
 
 def plugin_shutdown(handle):
+    _LOGGER.info('Fledge called plugin shutdown')
     global conn
     conn.close()
 
-################################################################################################################
-    
-def createTables(createTableString):
-    try:
-        conn.execute("CREATE TABLE IF NOT EXISTS "+createTableString)
-    except Exception as e:
-        if "0x0603" in str(e):  #0x0603 means Table already exists
-            _LOGGER.info("Plugin attempted to create tables that already exist") #It's possible some uncreated tables later in the string got ignored. Might need to handle that here
-        else:
-            raise(e)
-            
+################################################################################################################   
 
 def insertReadings(insertString):
     submitString=''
@@ -212,14 +185,4 @@ def insertReadings(insertString):
         success=True
     except Exception as e:
         _LOGGER.info("Insert Exception ---> "+str(e))
-        #experimental attempt at inserting recoverable data. Requires that inserts be passed as a list. Not needed once we move away from SQL inserts to write data.
-            #Maybe check here if exception is a type that warrents a split/retry (skip if connection exception, etc.)
-            #if insertList.__len__()>1:
-            #    mid=int(insertList.__len__()/2)
-            #    _LOGGER.info("Submitting split list of mid "+str(mid))
-            #    list1=insertList[:mid] #I thought this would create ovelap but doesn't
-            #    list2=insertList[mid:]
-            #    success1=insertReadings("INSERT INTO "+list1)
-            #    success2=insertReadings("INSERT INTO "+list2)
-            #    success=success1 or success2
     return success
