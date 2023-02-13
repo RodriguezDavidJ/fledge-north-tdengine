@@ -94,7 +94,7 @@ def plugin_init(data):
 
     #Max SQL statement size is configurable in tdengine I think, so maybe query and get that here
     conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_float (ts TIMESTAMP, val FLOAT, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))')
-    conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_int (ts TIMESTAMP, val INT, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
+    #conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_int (ts TIMESTAMP, val INT, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
     conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_bool (ts TIMESTAMP, val BOOL, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
     conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_str (ts TIMESTAMP, val BINARY(64), quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
 
@@ -132,9 +132,11 @@ async def plugin_send(handle, payload, stream_id):
         try:
             asset_code=p['asset_code']
             readings=p['reading']     
-            timestamp = str(datetime.strptime(p['user_ts'],'%Y-%m-%dt%H:%M:%S.%fz'))[:-3] #Format timestamp and chop off sub-millisecond
+            timestamp = str(datetime.strptime(p['user_ts'],'%Y-%m-%dt%H:%M:%S.%fz').astimezone(timezone.utc))[:-3] #Format timestamp and chop off sub-millisecond
             for readingName, value in readings.items():
                 valueType =  type(value).__name__
+                if valueType=="int":        #I'm not sure how to handle the case where a reading that normally is float has a value of 0, which gets rightly interpreted by type() as an integer. So forcing all integer readings to be float in TDengine right now. 
+                    valueType="float"
                 valueString=str(value)
                 insertString = insertString + database+"." + asset_code+"_"+readingName+" USING "+database+".fledge_"+valueType+" TAGS ('"+readingName+"','"+pluginId+"')" + " VALUES ('"+ timestamp + "', " + valueString + ", 0) "
             if len(insertString)>62000: #Could theoretically overshoot the 65k limit if the next string to be added is very long
@@ -162,7 +164,7 @@ async def plugin_send(handle, payload, stream_id):
 
 def plugin_reconfigure(handle, new_config):
     #idk why but the other north plugins don't do this, say it's not possible to reconfig north
-
+    _LOGGER.info('Fledge called plugin reconfigure')
     #new_handle = copy.deepcopy(new_config)  
     #return new_handle
     pass
