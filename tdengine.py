@@ -18,14 +18,9 @@ from fledge.services.south import exceptions
   #Accommodate sub-millisecond timestamp precision
 
 #Max SQL query length is 65480, according to https://tdengine.com/docs/en/v2.0/taos-sql
-#Interesting aside, if you do INSERT INTO tablename USING sTableName, and tablename already exists under a different supertable. TDEngine won't complain and just write to the existing table.
-
-#TDEngine Feedback: Would be helpful if a whole compounded insert statement wouldn't bail at the first issue.
 
 _LOGGER = logger.setup(__name__,level=logging.INFO)
 # _LOGGER = logger.setup(__name__)  <-- I asked abou this in Fledge slack, but still not sure why this works in other plugins but not this one
-
-global assetList #I am not 100% sure that multiple plugin instances won't fight over a variable declared here
 
 _DEFAULT_CONFIG = {
     'plugin': {
@@ -55,7 +50,7 @@ _DEFAULT_CONFIG = {
     'database': {
         'description': 'TDEngine database to write to',
         'type': 'string',
-        'default': 'Fledge',
+        'default': 'fledge',
         'displayName': 'Database Name'
     },
     'pluginId': {
@@ -69,6 +64,7 @@ _DEFAULT_CONFIG = {
 
 
 def plugin_info():
+    _LOGGER.info('TDEngine plugin info called')
     return {
         'name': 'tdengine',
         'version': '1.0',
@@ -76,12 +72,11 @@ def plugin_info():
         'interface': '1.0',
         'config': _DEFAULT_CONFIG
     }
+    
 
 
 def plugin_init(data):
     global conn
-    global assetList
-    assetList =[]
 
     config = data
     _LOGGER.info('TDEngine plugin with ID '+ config['pluginId']['value'] + ' starting up!')
@@ -90,11 +85,9 @@ def plugin_init(data):
     database = config['database']['value']
 
     conn = taosrest.connect(url=url, token=token)
-    #conn.execute('CREATE DATABASE IF NOT EXISTS '+database)     Apparently tdengine cloud does not yet allow remote database creation
-
+    
     #Max SQL statement size is configurable in tdengine I think, so maybe query and get that here
     conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_float (ts TIMESTAMP, val FLOAT, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))')
-    #conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_int (ts TIMESTAMP, val INT, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
     conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_bool (ts TIMESTAMP, val BOOL, quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
     conn.execute('CREATE STABLE IF NOT EXISTS '+database+'.fledge_str (ts TIMESTAMP, val BINARY(64), quality INT) TAGS (reading BINARY(64), pluginId BINARY(64))') 
 
@@ -106,68 +99,61 @@ def plugin_init(data):
 async def plugin_send(handle, payload, stream_id):
     _LOGGER.info('Plugin send begin')
     global conn
-    global assetList
 
     is_data_sent=False
     last_object_id = 0
+    last_object_id_attempt=0
     num_sent=0
-    createTableString=''
+    num_sent_attempt=0
     insertString=''
 
-    #To-do: If disconnected, reconnect
-    # try: 
-    #   conn.execute('SHOW DATABASES')
-    # except:
-    #   conn = taosrest.connect(url=handle['url']['value'], token=handle['token']['value'])
 
-    #dataTypeTranslator={"float":"float", "int":"int", "bool":"bool", "str":"binary(64)"}
     database=handle['database']['value']
     pluginId=handle['pluginId']['value']
 
-    payload_sorted=sorted(payload, key=lambda i: (i['asset_code'],i['user_ts'])) #Supposed to make sure readings are sorted by asset code, and timestamp ascending
-
     #Build insert string from payload
     _LOGGER.info('Parsing payload')
-    for p in payload_sorted:
+    for p in payload:
         try:
             asset_code=p['asset_code']
             readings=p['reading']     
-            timestamp = str(datetime.strptime(p['user_ts'],'%Y-%m-%dt%H:%M:%S.%fz').astimezone(timezone.utc))[:-3] #Format timestamp and chop off sub-millisecond
+            timestamp = str(datetime.strptime(p['user_ts'],'%Y-%m-%d %H:%M:%S.%f%z').astimezone(timezone.utc))[:-3] #Format timestamp and chop off sub-millisecond
             for readingName, value in readings.items():
                 valueType =  type(value).__name__
-                if valueType=="int":        #I'm not sure how to handle the case where a reading that normally is float has a value of 0, which gets rightly interpreted by type() as an integer. So forcing all integer readings to be float in TDengine right now. 
+                if valueType=="int":        
                     valueType="float"
+                if valueType=="str":
+                    value="'"+value+"'"
                 valueString=str(value)
                 insertString = insertString + database+"." + asset_code+"_"+readingName+" USING "+database+".fledge_"+valueType+" TAGS ('"+readingName+"','"+pluginId+"')" + " VALUES ('"+ timestamp + "', " + valueString + ", 0) "
+            
+            num_sent_attempt+=1
+            last_object_id_attempt = p['id']
+
             if len(insertString)>62000: #Could theoretically overshoot the 65k limit if the next string to be added is very long
-                #_LOGGER.info("Max insert statement length reached at "+str(p))
-                success=insertReadings(insertString)
+                success=insertReadings(insertString)                
+                if success:
+                    num_sent=num_sent+num_sent_attempt
+                    last_object_id=last_object_id_attempt
+                num_sent_attempt=0
                 is_data_sent=success or is_data_sent
                 insertString=''
 
-            num_sent+=1
-            last_object_id = p['id']
+
             
         except Exception as e:
             _LOGGER.info("Paylod Loop Exception! Reading "+str(p)+" --> "+str(e))
 
-    _LOGGER.info('Checking for data to insert')
     if len(insertString)>0:
-        _LOGGER.info('Inserting data')
-        success=insertReadings(insertString)  #It's possible the whole query fails, or one of the readings errors out and causes the rest not to be written. Not accounted for right now
-        is_data_sent=success or is_data_sent 
+        success=insertReadings(insertString)  
+        if success:
+            num_sent=num_sent+num_sent_attempt
+            last_object_id=last_object_id_attempt
+        is_data_sent=success or is_data_sent
 
     _LOGGER.info('Done! Events sent: '+str(num_sent)+" of "+str(len(payload))+" Data sent: "+str(is_data_sent)+" id: "+str(last_object_id))
     return is_data_sent, last_object_id, num_sent
     
-
-
-def plugin_reconfigure(handle, new_config):
-    #idk why but the other north plugins don't do this, say it's not possible to reconfig north
-    _LOGGER.info('Fledge called plugin reconfigure')
-    #new_handle = copy.deepcopy(new_config)  
-    #return new_handle
-    pass
     
     
 
